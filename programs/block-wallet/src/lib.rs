@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Token, TokenAccount, Transfer};
+use anchor_lang::solana_program::{program::invoke, system_instruction};
 
 declare_id!("A77rXueYXYg3bJejEFRuQFv2bbV3sBhCZwotH4cy4HCX");
 
@@ -7,142 +7,127 @@ declare_id!("A77rXueYXYg3bJejEFRuQFv2bbV3sBhCZwotH4cy4HCX");
 pub mod block_wallet {
     use super::*;
 
-    // Block a wallet with an expiry time
-    pub fn block_wallet(ctx: Context<BlockWallet>, expiry_time: i64) -> Result<()> {
-        let blocked_wallet = &mut ctx.accounts.blocked_wallet;
+    const BLOCK_FEE_LAMPORTS: u64 = 50_000_000; // 0.05 SOL
+    const UNBLOCK_FEE_LAMPORTS: u64 = 250_000_000; // 0.25 SOL
+
+    pub fn initialize(ctx: Context<Initialize>, fee_account: Pubkey) -> Result<()> {
+        let wallet = &mut ctx.accounts.wallet;
+        wallet.block_expiry = 0;
+        wallet.fee_account = fee_account;
+        Ok(())
+    }
+
+    pub fn block_wallet(ctx: Context<BlockWallet>, block_duration: i64) -> Result<()> {
+        let wallet = &mut ctx.accounts.wallet;
         let clock = Clock::get()?;
 
-        // Set wallet block details
-        blocked_wallet.wallet = ctx.accounts.user.key();
-        blocked_wallet.block_until = clock.unix_timestamp + expiry_time; // Expiry time in seconds
-        blocked_wallet.is_blocked = true;
+        // Ensure the wallet is blocked and block duration has expired
+        require!(clock.unix_timestamp > wallet.block_expiry, CustomError::BlockNotExpired);
 
-        // Charge block fee
-        let fee_account = &mut ctx.accounts.fee_account;
-        let user = &ctx.accounts.user;
+        // Set the block expiry time
+        wallet.block_expiry = clock.unix_timestamp + block_duration;
 
-        let cpi_accounts = Transfer {
-            from: ctx.accounts.user_token_account.to_account_info(),
-            to: fee_account.to_account_info(),
-            authority: user.to_account_info(),
-        };
-
-        let cpi_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
-        token::transfer(cpi_ctx, 50_000_000)?; // 0.05 SOL (adjust decimals based on SOL token)
+        // Transfer 0.05 SOL as block fee
+        invoke(
+            &system_instruction::transfer(
+                &ctx.accounts.user.key(),
+                &ctx.accounts.fee_account.key(),
+                BLOCK_FEE_LAMPORTS,
+            ),
+            &[
+                ctx.accounts.user.to_account_info(),
+                ctx.accounts.fee_account.to_account_info(),
+            ],
+        )?;
 
         Ok(())
     }
 
-    // Unblock a wallet before expiry by paying a higher fee
     pub fn unblock_wallet(ctx: Context<UnblockWallet>) -> Result<()> {
-        let blocked_wallet = &mut ctx.accounts.blocked_wallet;
-
-        require!(blocked_wallet.is_blocked, CustomError::WalletNotBlocked);
-
-        // Charge unblock fee
-        let fee_account = &mut ctx.accounts.fee_account;
-        let user = &ctx.accounts.user;
-
-        let cpi_accounts = Transfer {
-            from: ctx.accounts.user_token_account.to_account_info(),
-            to: fee_account.to_account_info(),
-            authority: user.to_account_info(),
-        };
-
-        let cpi_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
-        token::transfer(cpi_ctx, 250_000_000)?; // 0.25 SOL (adjust decimals based on SOL token)
-
-        // Unblock the wallet
-        blocked_wallet.is_blocked = false;
-        blocked_wallet.block_until = 0;
-
-        Ok(())
-    }
-
-    // Sell tokens (if wallet is blocked, check provenance of tokens)
-    pub fn sell_tokens(ctx: Context<SellTokens>, token_mint: Pubkey, amount: u64) -> Result<()> {
-        let blocked_wallet = &ctx.accounts.blocked_wallet;
+        let wallet = &mut ctx.accounts.wallet;
         let clock = Clock::get()?;
 
-        // Restrict transactions for blocked wallets
-        if blocked_wallet.is_blocked && clock.unix_timestamp < blocked_wallet.block_until {
-            require!(
-                !BLOCKED_TOKENS.contains(&token_mint.to_string().as_str()),
-                CustomError::BlockedToken
-            );
+        require!(wallet.block_expiry > 0, CustomError::BlockExpired);
+
+        if wallet.block_expiry > clock.unix_timestamp {
+            // Transfer 0.25 SOL as unblock fee
+            invoke(
+                &system_instruction::transfer(
+                    &ctx.accounts.user.key(),
+                    &ctx.accounts.fee_account.key(),
+                    UNBLOCK_FEE_LAMPORTS,
+                ),
+                &[
+                    ctx.accounts.user.to_account_info(),
+                    ctx.accounts.fee_account.to_account_info(),
+                ],
+            )?;
         }
-
-        // Proceed with the sale
-        let cpi_accounts = Transfer {
-            from: ctx.accounts.user_token_account.to_account_info(),
-            to: ctx.accounts.destination_account.to_account_info(),
-            authority: ctx.accounts.authority.to_account_info(),
-        };
-
-        let cpi_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
-        token::transfer(cpi_ctx, amount)?;
+        // Reset block expiry
+        wallet.block_expiry = 0;
 
         Ok(())
     }
+    
+    pub fn get_block_status(ctx: Context<GetBlockStatus>) -> Result<i64> {
+        let wallet = &ctx.accounts.wallet;
+        Ok(wallet.block_expiry)
+    }
+
 }
 
-// Contexts for each instruction
+const EXPECTED_WALLET_PUBLIC_KEY: &str = "FwLFdJeGwx7UUAQReU4tx94KA4KZjyp4eX8kdWf4yyG8";
+
+#[derive(Accounts)]
+pub struct Initialize<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+    #[account(init, seeds = [b"wallet", user.key().as_ref()], bump, payer = user, space = 8 + std::mem::size_of::<Wallet>())]
+    pub wallet: Account<'info, Wallet>,
+    pub system_program: Program<'info, System>,
+}
+
 #[derive(Accounts)]
 pub struct BlockWallet<'info> {
     #[account(mut)]
-    pub blocked_wallet: Account<'info, BlockedWallet>,
-    #[account(mut)]
     pub user: Signer<'info>,
-    #[account(mut)]
-    pub user_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
-    pub fee_account: Account<'info, TokenAccount>,
-    pub token_program: Program<'info, Token>,
+    #[account(mut, seeds = [b"wallet", user.key().as_ref()], bump)]    
+    pub wallet: Account<'info, Wallet>,
+    /// CHECK: The wallet account is explicitly validated to match the Phantom wallet's public key.
+    #[account(mut, constraint = fee_account.key() == EXPECTED_WALLET_PUBLIC_KEY.parse::<Pubkey>().unwrap())]
+    pub fee_account: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
-    pub rent: Sysvar<'info, Rent>,
 }
 
 #[derive(Accounts)]
 pub struct UnblockWallet<'info> {
     #[account(mut)]
-    pub blocked_wallet: Account<'info, BlockedWallet>,
-    #[account(mut)]
     pub user: Signer<'info>,
-    #[account(mut)]
-    pub user_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
-    pub fee_account: Account<'info, TokenAccount>,
-    pub token_program: Program<'info, Token>,
+    #[account(mut, seeds = [b"wallet", user.key().as_ref()], bump)]
+    pub wallet: Account<'info, Wallet>,
+    /// CHECK: The wallet account is explicitly validated to match the Phantom wallet's public key.
+    #[account(mut, constraint = fee_account.key() == EXPECTED_WALLET_PUBLIC_KEY.parse::<Pubkey>().unwrap())]
+    pub fee_account: UncheckedAccount<'info>,
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
-pub struct SellTokens<'info> {
-    #[account(mut)]
-    pub blocked_wallet: Account<'info, BlockedWallet>,
-    #[account(mut)]
-    pub user_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
-    pub destination_account: Account<'info, TokenAccount>,
-    pub authority: Signer<'info>,
-    pub token_program: Program<'info, Token>,
+pub struct GetBlockStatus<'info> {
+    #[account(mut, seeds = [b"wallet", user.key().as_ref()], bump)]
+    pub wallet: Account<'info, Wallet>,
+    pub user: Signer<'info>,
 }
 
-// Data structure for blocked wallet account
 #[account]
-pub struct BlockedWallet {
-    pub wallet: Pubkey,        // Wallet address
-    pub block_until: i64,      // Timestamp until which the wallet is blocked
-    pub is_blocked: bool,      // Block status
+pub struct Wallet {
+    pub block_expiry: i64, // Timestamp for block expiry
+    pub fee_account: Pubkey,
 }
 
-// Errors
 #[error_code]
 pub enum CustomError {
-    #[msg("This wallet is not blocked.")]
-    WalletNotBlocked,
-    #[msg("This token is blocked.")]
-    BlockedToken,
+    #[msg("Block duration has not yet expired.")]
+    BlockNotExpired,
+    #[msg("Block duration already expired.")]
+    BlockExpired,
 }
-
-// Constants
-const BLOCKED_TOKENS: [&str; 2] = ["pump.fun_mint_address", "moonshot_mint_address"]; // Replace with actual mint addresses

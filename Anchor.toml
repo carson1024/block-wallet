@@ -7,11 +7,14 @@ skip-lint = false
 [programs.localnet]
 block_wallet = "A77rXueYXYg3bJejEFRuQFv2bbV3sBhCZwotH4cy4HCX"
 
+[programs.devnet]
+block_wallet = "A77rXueYXYg3bJejEFRuQFv2bbV3sBhCZwotH4cy4HCX"
+
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "Localnet"
+cluster = "devnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
