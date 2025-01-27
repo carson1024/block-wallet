@@ -14,7 +14,7 @@ block_wallet = "A77rXueYXYg3bJejEFRuQFv2bbV3sBhCZwotH4cy4HCX"
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "devnet"
+cluster = "https://devnet.helius-rpc.com/?api-key=ed4cacb9-dfb0-49f2-b133-84d15a49a704"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
